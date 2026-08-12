@@ -1588,6 +1588,22 @@ async function runMediaWait(rawArgs) {
   });
 }
 
+// Flush stdout and stderr before exiting. process.exit() terminates the
+// process without waiting for pending async writes; when stdout is a pipe
+// (Windows named pipes, or large/backpressured output on any platform) the
+// final JSON line can be dropped, leaving the caller with exit 0 and empty
+// output. Writing an empty chunk with a callback resolves only after every
+// previously queued write has been flushed. The resolve callback
+// deliberately ignores the error argument (EPIPE and similar still exit
+// with the requested code).
+async function flushStreamsAndExit(code) {
+  await Promise.all([
+    new Promise((resolve) => process.stdout.write('', resolve)),
+    new Promise((resolve) => process.stderr.write('', resolve)),
+  ]);
+  process.exit(code);
+}
+
 async function pollUntilDoneOrBudget(daemonUrl, taskId, sinceStart, options = {}) {
   const totalBudgetMs = typeof options.totalBudgetMs === 'number' ? options.totalBudgetMs : 25_000;
   const perCallTimeoutMs = 4_000;
@@ -1617,23 +1633,23 @@ async function pollUntilDoneOrBudget(daemonUrl, taskId, sinceStart, options = {}
       });
     } catch (err) {
       surfaceFetchError(err, daemonUrl);
-      process.exit(3);
+      await flushStreamsAndExit(3);
     }
     if (resp.status === 404) {
       console.error(`task ${taskId} not found (expired or never queued)`);
-      process.exit(4);
+      await flushStreamsAndExit(4);
     }
     if (!resp.ok) {
       const text = await resp.text();
       console.error(`daemon ${resp.status}: ${text}`);
-      process.exit(4);
+      await flushStreamsAndExit(4);
     }
     let snap;
     try {
       snap = await resp.json();
     } catch {
       console.error('daemon returned non-JSON for /wait');
-      process.exit(4);
+      await flushStreamsAndExit(4);
     }
     lastSnapshot = snap;
     if (Array.isArray(snap.progress)) {
@@ -1661,7 +1677,7 @@ async function pollUntilDoneOrBudget(daemonUrl, taskId, sinceStart, options = {}
         );
       }
       process.stdout.write(JSON.stringify({ file }) + '\n');
-      process.exit(file.providerError ? 5 : 0);
+      await flushStreamsAndExit(file.providerError ? 5 : 0);
     }
     if (snap.status === 'failed') {
       const msg = snap.error?.message || 'task failed';
@@ -1669,7 +1685,7 @@ async function pollUntilDoneOrBudget(daemonUrl, taskId, sinceStart, options = {}
       process.stdout.write(
         JSON.stringify({ taskId, status: 'failed', error: snap.error || {} }) + '\n',
       );
-      process.exit(snap.error?.status || 5);
+      await flushStreamsAndExit(snap.error?.status || 5);
     }
     if (snap.status === 'interrupted') {
       const msg = snap.error?.message || 'task interrupted';
@@ -1677,7 +1693,7 @@ async function pollUntilDoneOrBudget(daemonUrl, taskId, sinceStart, options = {}
       process.stdout.write(
         JSON.stringify({ taskId, status: 'interrupted', error: snap.error || {} }) + '\n',
       );
-      process.exit(snap.error?.status || 5);
+      await flushStreamsAndExit(snap.error?.status || 5);
     }
   }
 
@@ -1697,7 +1713,7 @@ async function pollUntilDoneOrBudget(daemonUrl, taskId, sinceStart, options = {}
       `Run \`"$OD_NODE_BIN" "$OD_BIN" media wait ${taskId} --since ${since}\` to continue in an agent runtime ` +
       `(${stillRunningHint}).\n`,
   );
-  process.exit(stillRunningExitCode);
+  await flushStreamsAndExit(stillRunningExitCode);
 }
 
 function surfaceFetchError(err, daemonUrl) {

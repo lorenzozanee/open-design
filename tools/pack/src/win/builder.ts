@@ -71,7 +71,7 @@ import type {
 const execFileAsync = promisify(execFile);
 const WIN_ARCHIVE_CACHE_VERSION = 3;
 const WIN_ELECTRON_BUILDER_DIR_CACHE_VERSION = 8;
-const WIN_NSIS_BASE_PAYLOAD_INPUT_HASH_CACHE_VERSION = 2;
+const WIN_NSIS_BASE_PAYLOAD_INPUT_HASH_CACHE_VERSION = 3;
 
 async function hashWinNsisInstallerImplementation(config: ToolPackConfig): Promise<string> {
   const sourceModulePath = join(config.workspaceRoot, "tools", "pack", "src", "win", "custom-installer.ts");
@@ -332,6 +332,7 @@ async function resolveCachedNsisBasePayloadInputHash(
     : hashJson({
       cacheEntryPath: builtApp.cacheEntryPath,
       excludedOverlayPaths: resolveWinNsisOverlayRequiredPaths(),
+      odCmdScript: createWinOdCmdScript(),
       version: WIN_NSIS_BASE_PAYLOAD_INPUT_HASH_CACHE_VERSION,
     });
   await writeFile(
@@ -443,6 +444,26 @@ async function assertWinUnpackedNodePtyRuntime(unpackedRoot: string): Promise<vo
     arch: "x64",
     platform: "win32",
   });
+}
+
+export function createWinOdCmdScript(): string {
+  const daemonCliPath = join("resources", WIN_PREBUNDLED_DAEMON_CLI_RELATIVE_PATH).split("/").join("\\");
+  return [
+    "@echo off",
+    "setlocal",
+    'set "ELECTRON_RUN_AS_NODE=1"',
+    `"%~dp0${PRODUCT_NAME}.exe" "%~dp0${daemonCliPath}" %*`,
+    "",
+  ].join("\r\n");
+}
+
+export async function writeWinOdCmdShim(unpackedRoot: string): Promise<void> {
+  const shimPath = join(unpackedRoot, "od.cmd");
+  const script = createWinOdCmdScript();
+  await writeFile(shimPath, script, "utf8");
+  if ((await readFile(shimPath, "utf8")) !== script) {
+    throw new Error("staged od.cmd shim content mismatch");
+  }
 }
 
 export async function materializeCachedUnpackedForInstaller(
@@ -844,7 +865,9 @@ export async function runElectronBuilder(
       if (materializedManifest == null) {
         throw new Error("electron builder cache entry disappeared before installer materialization");
       }
-      return materializeCachedUnpackedForInstaller(paths, packagedVersion);
+      const builtApp = await materializeCachedUnpackedForInstaller(paths, packagedVersion);
+      await writeWinOdCmdShim(paths.unpackedRoot);
+      return builtApp;
     });
     let signedUnpacked = false;
     const ensureSignedUnpacked = async (): Promise<void> => {
@@ -872,6 +895,7 @@ export async function runElectronBuilder(
           key: hashJson({
             archiveCacheVersion: WIN_ARCHIVE_CACHE_VERSION,
             namespace: config.namespace,
+            odCmdScript: createWinOdCmdScript(),
             packagedAppKey,
             packagedVersion,
             signing: signingCacheKey,

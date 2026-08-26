@@ -1,4 +1,4 @@
-import type { Brand, BrandColor, BrandColorRole, BrandFontSpec } from '@open-design/contracts';
+import type { Brand, BrandColor, BrandColorRole, BrandFontSpec, BrandSeedOverrides } from '@open-design/contracts';
 
 import { luminance, normalizeHex, saturation } from './seed.js';
 import { validateBrand } from './validate.js';
@@ -29,6 +29,8 @@ const DEFAULT_BACKGROUND = '#ffffff';
 const DEFAULT_FOREGROUND = '#111111';
 const DEFAULT_ACCENT = '#1677ff';
 const SANS_FALLBACKS = ['system-ui', '-apple-system', 'Segoe UI', 'Helvetica Neue', 'Arial', 'sans-serif'];
+const CSS_GENERIC_FAMILY_RE =
+  /\b(system-ui|ui-sans-serif|ui-serif|ui-monospace|ui-rounded|sans-serif|serif|monospace|cursive|fantasy)\b/i;
 
 export function sourceUrlForDesignMd(markdown: string, fallbackName = 'Design System'): string {
   const parsed = parseDesignMd(markdown);
@@ -53,7 +55,9 @@ export function brandFromDesignMd(input: BrandFromDesignMdInput): Brand | null {
   const overview = firstSection(parsed.body, ['overview', 'brand & style', 'brand and style']) ?? firstParagraph(parsed.body);
   const description = input.description?.trim() || scalarString(parsed.frontmatter.description) || overview || '';
   const tagline = firstSentence(overview || description);
-  const colors = resolveColors(collectColors(parsed));
+  const colorCandidates = collectColors(parsed);
+  const colors = resolveColors(colorCandidates);
+  const seedOverrides = semanticSeedOverrides(colorCandidates, colors);
   const fonts = collectFonts(parsed.frontmatter, parsed.body);
   const display = fontSpec(
     fonts.find((font) => /display|heading|headline|h1|title/i.test(font.key))?.family ??
@@ -75,6 +79,7 @@ export function brandFromDesignMd(input: BrandFromDesignMdInput): Brand | null {
     tagline,
     description,
     sourceUrl: input.sourceUrl,
+    ...(seedOverrides ? { seed: seedOverrides } : {}),
     logo: {
       primary: null,
       alternates: [],
@@ -249,6 +254,24 @@ function resolveColors(candidates: DesignMdColor[]): BrandColor[] {
   return picked;
 }
 
+function semanticSeedOverrides(
+  candidates: DesignMdColor[],
+  colors: BrandColor[],
+): BrandSeedOverrides | undefined {
+  const overrides: BrandSeedOverrides = {};
+  const warning = candidates.find((item) => /warning|caution/i.test(item.key));
+  if (warning) overrides.colorWarning = warning.hex;
+  const error = candidates.find((item) => /error|danger/i.test(item.key));
+  if (error) overrides.colorError = error.hex;
+  const success = candidates.find((item) => /success/i.test(item.key));
+  // Success already rides the accent-secondary role when the resolver picked
+  // the same hex; duplicating it in the override channel would leak a field.
+  if (success && !colors.some((c) => c.role === 'accent-secondary' && c.hex === success.hex)) {
+    overrides.colorSuccess = success.hex;
+  }
+  return Object.keys(overrides).length > 0 ? overrides : undefined;
+}
+
 function collectFonts(frontmatter: Record<string, unknown>, body: string): FontCandidate[] {
   const out: FontCandidate[] = [];
   const seen = new Set<string>();
@@ -260,10 +283,18 @@ function collectFonts(frontmatter: Record<string, unknown>, body: string): FontC
   };
   collectFontValues(frontmatter.typography ?? frontmatter.fonts ?? frontmatter.type, [], add);
   for (const line of body.split('\n')) {
+    // Explicit declarations win: a line like `font-family: Inter, system-ui,
+    // sans-serif;` must resolve to Inter, never to the generic keyword that
+    // happens to appear later in the same stack.
     const familyMatch =
       /(?:font-family|fontFamily|family)\s*[:=-]\s*`?["']?([^`"',;()]+(?:\s+[^`"',;()]+){0,3})/i.exec(line) ??
       /\b([A-Z][A-Za-z0-9]+(?:Sans|Serif|Mono|Display|Text|Grotesk|Gothic|Humanist|Roman|UI)\b(?:\s+[A-Z][A-Za-z0-9]+)*)/.exec(line);
-    if (familyMatch?.[1]) add(line.slice(0, 48), familyMatch[1]);
+    if (familyMatch?.[1]) {
+      add(line.slice(0, 48), familyMatch[1]);
+      continue;
+    }
+    const genericFamily = CSS_GENERIC_FAMILY_RE.exec(line)?.[0];
+    if (genericFamily) add(line.slice(0, 48), genericFamily);
   }
   return out;
 }

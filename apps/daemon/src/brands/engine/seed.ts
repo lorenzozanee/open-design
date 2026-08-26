@@ -230,7 +230,7 @@ function fontStack(primaryFamily: string | undefined, fallbacks: string[]): stri
  *                    otherwise light foregrounds fall back to black and dark
  *                    canvases fall back to white as before
  *  - fontFamily    ← body face + fallbacks + system tail
- *  - borderRadius  ← parseInt(layout.radius) || 6
+ *  - borderRadius  ← parseInt(layout.radius) when >= 0, else 6
  *  - everything else ← defaultSeed
  */
 export function seedFromBrand(brand: Brand): SeedToken {
@@ -268,7 +268,7 @@ export function seedFromBrand(brand: Brand): SeedToken {
     colorSuccess: successHex,
     ...neutralBases(background?.hex, surface?.hex, foreground?.hex),
     fontFamily: fontStack(brand.typography?.body?.family, brand.typography?.body?.fallbacks ?? []),
-    borderRadius: Number.isFinite(radius) && radius > 0 ? radius : defaultSeed.borderRadius,
+    borderRadius: Number.isFinite(radius) && radius >= 0 ? radius : defaultSeed.borderRadius,
   };
 }
 

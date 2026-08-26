@@ -238,4 +238,95 @@ Use system-ui for all interface text.
     ) as Record<string, unknown>;
     expect(tokens.colorError).toBe('#b30000');
   });
+
+  it('keeps a later Error label even when it shares the Primary hex', async () => {
+    const markdown = `---
+name: Duplicate Hex System
+radius: 8px
+spacing: 8px
+---
+
+# Duplicate Hex System
+
+## Colors
+- Background: #ffffff
+- Foreground: #161616
+- Primary: #b30000
+- Error: #b30000
+
+## Typography
+Use system-ui for all interface text.
+`;
+    const brand = brandFromDesignMd({ markdown, sourceUrl: 'designmd://duplicate-hex-system' });
+    if (!brand) throw new Error('duplicate-hex fixture failed to parse');
+
+    // The Error-labelled occurrence shares its hex with Primary, but the label
+    // is explicit — the seed override channel must still carry colorError.
+    expect(brand.seed).toEqual({ colorError: '#b30000' });
+
+    const brandsRoot = path.join(tempDir, 'brands');
+    writeBrand(brandsRoot, 'duplicate-hex-system', brand);
+    await rebuildSystem(brandsRoot, 'duplicate-hex-system');
+
+    const tokens = JSON.parse(
+      readFileSync(path.join(brandsRoot, 'duplicate-hex-system', 'system', 'tokens.default.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    expect(tokens.colorError).toBe('#b30000');
+  });
+
+  it('preserves an explicit non-green Success color as the colorSuccess seed override', async () => {
+    const markdown = `---
+name: Blue Success System
+radius: 8px
+spacing: 8px
+---
+
+# Blue Success System
+
+## Colors
+- Background: #ffffff
+- Foreground: #161616
+- Primary accent: #0055cc
+- Success: #2563eb
+
+## Typography
+Use system-ui for all interface text.
+`;
+    const brand = brandFromDesignMd({ markdown, sourceUrl: 'designmd://blue-success-system' });
+    if (!brand) throw new Error('blue-success fixture failed to parse');
+
+    // Success rides the accent-secondary role, but seedFromBrand only derives
+    // success from that role when it reads green — an authored non-green
+    // Success must survive through the explicit override channel instead.
+    expect(brand.seed).toEqual({ colorSuccess: '#2563eb' });
+
+    const brandsRoot = path.join(tempDir, 'brands');
+    writeBrand(brandsRoot, 'blue-success-system', brand);
+    await rebuildSystem(brandsRoot, 'blue-success-system');
+
+    const tokens = JSON.parse(
+      readFileSync(path.join(brandsRoot, 'blue-success-system', 'system', 'tokens.default.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    expect(tokens.colorSuccess).toBe('#2563eb');
+  });
+
+  it('accepts a true zero radius but falls back to the default for fractional radii', () => {
+    const seedRadiusFor = (radius: string): number => {
+      const brand = brandFromDesignMd({
+        markdown: DESIGN_MD.replace('radius: 0px', `radius: ${radius}`),
+        sourceUrl: SOURCE_URL,
+      });
+      if (!brand) throw new Error(`radius fixture ${radius} failed to parse`);
+      return seedFromBrand(brand).borderRadius;
+    };
+
+    // Whole numbers keep their authored value, including true zero...
+    expect(seedRadiusFor('0px')).toBe(0);
+    expect(seedRadiusFor('12px')).toBe(12);
+    // ...while fractional dimensions cannot be represented in the integer
+    // seed and must fall back to 6 instead of truncating to square corners.
+    expect(seedRadiusFor('0.5rem')).toBe(6);
+    expect(seedRadiusFor('0.25em')).toBe(6);
+    expect(seedRadiusFor('0.5px')).toBe(6);
+  });
 });

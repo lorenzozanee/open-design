@@ -1,6 +1,7 @@
 import type { Brand, BrandColor, BrandColorRole, BrandFontSpec, BrandSeedOverrides } from '@open-design/contracts';
 
 import { luminance, normalizeHex, saturation } from './seed.js';
+import { derivedColorSuccess } from './engine/seed.js';
 import { validateBrand } from './validate.js';
 
 export interface BrandFromDesignMdInput {
@@ -13,6 +14,15 @@ export interface BrandFromDesignMdInput {
 interface DesignMdColor {
   key: string;
   hex: string;
+}
+
+interface CollectedColors {
+  /** Hex-deduped palette candidates feeding role resolution. */
+  candidates: DesignMdColor[];
+  /** Every labelled occurrence, retained independently of palette dedupe so
+   *  semantic labels sharing a hex with another role (Primary and Error both
+   *  #b30000) still reach the seed override channel. */
+  labelled: DesignMdColor[];
 }
 
 interface FontCandidate {
@@ -55,9 +65,9 @@ export function brandFromDesignMd(input: BrandFromDesignMdInput): Brand | null {
   const overview = firstSection(parsed.body, ['overview', 'brand & style', 'brand and style']) ?? firstParagraph(parsed.body);
   const description = input.description?.trim() || scalarString(parsed.frontmatter.description) || overview || '';
   const tagline = firstSentence(overview || description);
-  const colorCandidates = collectColors(parsed);
-  const colors = resolveColors(colorCandidates);
-  const seedOverrides = semanticSeedOverrides(colorCandidates, colors);
+  const collectedColors = collectColors(parsed);
+  const colors = resolveColors(collectedColors.candidates);
+  const seedOverrides = semanticSeedOverrides(collectedColors.labelled, colors);
   const fonts = collectFonts(parsed.frontmatter, parsed.body);
   const display = fontSpec(
     fonts.find((font) => /display|heading|headline|h1|title/i.test(font.key))?.family ??
@@ -178,14 +188,17 @@ function scalarString(value: unknown): string | null {
   return trimmed ? trimmed : null;
 }
 
-function collectColors(parsed: ParsedDesignMd): DesignMdColor[] {
-  const out: DesignMdColor[] = [];
+function collectColors(parsed: ParsedDesignMd): CollectedColors {
+  const candidates: DesignMdColor[] = [];
+  const labelled: DesignMdColor[] = [];
   const seen = new Set<string>();
   const add = (key: string, raw: string) => {
     const hex = normalizeHex(raw);
-    if (!hex || seen.has(hex)) return;
+    if (!hex) return;
+    labelled.push({ key, hex });
+    if (seen.has(hex)) return;
     seen.add(hex);
-    out.push({ key, hex });
+    candidates.push({ key, hex });
   };
   collectHexValues(parsed.frontmatter, [], add);
   for (const line of parsed.body.split('\n')) {
@@ -195,7 +208,7 @@ function collectColors(parsed: ParsedDesignMd): DesignMdColor[] {
       add(key, hex);
     }
   }
-  return out;
+  return { candidates, labelled };
 }
 
 function collectHexValues(value: unknown, path: string[], add: (key: string, raw: string) => void): void {
@@ -255,19 +268,24 @@ function resolveColors(candidates: DesignMdColor[]): BrandColor[] {
 }
 
 function semanticSeedOverrides(
-  candidates: DesignMdColor[],
+  labelled: DesignMdColor[],
   colors: BrandColor[],
 ): BrandSeedOverrides | undefined {
   const overrides: BrandSeedOverrides = {};
-  const warning = candidates.find((item) => /warning|caution/i.test(item.key));
+  const warning = labelled.find((item) => /warning|caution/i.test(item.key));
   if (warning) overrides.colorWarning = warning.hex;
-  const error = candidates.find((item) => /error|danger/i.test(item.key));
+  const error = labelled.find((item) => /error|danger/i.test(item.key));
   if (error) overrides.colorError = error.hex;
-  const success = candidates.find((item) => /success/i.test(item.key));
-  // Success already rides the accent-secondary role when the resolver picked
-  // the same hex; duplicating it in the override channel would leak a field.
-  if (success && !colors.some((c) => c.role === 'accent-secondary' && c.hex === success.hex)) {
-    overrides.colorSuccess = success.hex;
+  const success = labelled.find((item) => /success/i.test(item.key));
+  // Only override when the engine would not derive this exact value anyway:
+  // seedFromBrand maps accent-secondary onto success solely when it reads
+  // green, so a non-green authored Success would otherwise be lost to the
+  // Ant default.
+  if (success) {
+    const accentSecondaryHex = colors.find((c) => c.role === 'accent-secondary')?.hex;
+    if (derivedColorSuccess(accentSecondaryHex) !== success.hex) {
+      overrides.colorSuccess = success.hex;
+    }
   }
   return Object.keys(overrides).length > 0 ? overrides : undefined;
 }

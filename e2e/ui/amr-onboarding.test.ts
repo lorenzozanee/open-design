@@ -58,9 +58,9 @@ async function safeEvaluate<T, A>(page: Page, pageFunction: (arg: A) => T, arg: 
 async function safeEvaluate<T, A>(page: Page, pageFunction: (arg: A) => T, arg?: A): Promise<T | undefined> {
   try {
     if (arg === undefined) {
-      return await page.evaluate(pageFunction as () => T);
+      return await (page.evaluate as unknown as (fn: () => T) => Promise<T>)(pageFunction as () => T);
     }
-    return await page.evaluate(pageFunction, arg as A);
+    return await (page.evaluate as unknown as (fn: (arg: A) => T, arg: A) => Promise<T>)(pageFunction, arg as A);
   } catch (error) {
     if (isOnboardingReloadRaceError(error)) return undefined;
     throw error;

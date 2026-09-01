@@ -18,6 +18,11 @@ import {
 } from '@/playwright/mock-factory';
 import { T } from '@/timeouts';
 
+const isContextDestroyedError = (error: unknown) =>
+  /Execution context was destroyed|Target closed|Target page, context or browser has been closed/i.test(
+    error instanceof Error ? error.message : String(error),
+  );
+
 type OnboardingConfig = {
   mode: 'daemon' | 'api';
   apiKey: string;
@@ -429,6 +434,7 @@ test('[P0] onboarding reload restores and cancels an active Cloud login', async 
   await expect(page.getByRole('button', { name: /Local (coding )?agent/i })).toHaveCount(0);
   await expect(page.getByRole('button', { name: /Bring Your Own Key/i })).toHaveCount(0);
 
+  await reinstallStatusMockForReload(page);
   await page.reload({ waitUntil: 'domcontentloaded' });
   await waitForLoadingToClear(page);
   await expect(page.getByRole('button', { name: /Cancel sign-in/i })).toBeVisible();
@@ -451,6 +457,7 @@ test('[P0] onboarding reload resumes an active Cloud login through completion', 
   await gotoOnboarding(page);
   await expect(page.getByRole('button', { name: /Cancel sign-in/i })).toBeVisible();
 
+  await reinstallStatusMockForReload(page);
   await page.reload({ waitUntil: 'domcontentloaded' });
   await waitForLoadingToClear(page);
   await expect(page.getByRole('button', { name: /Cancel sign-in/i })).toBeVisible();
@@ -1219,6 +1226,27 @@ async function wireOnboardingMocks(
     ? '11111111-1111-4111-8111-111111111111'
     : null;
 
+  async function safeEvaluate<R>(fn: () => R): Promise<R | undefined>;
+  async function safeEvaluate<T, R>(fn: (arg: T) => R, arg: T): Promise<R | undefined>;
+  async function safeEvaluate(fn: any, arg?: any): Promise<any> {
+    if (page.isClosed()) return undefined;
+    try {
+      return arg !== undefined ? await page.evaluate(fn, arg) : await page.evaluate(fn);
+    } catch (error) {
+      if (isContextDestroyedError(error)) return undefined;
+      throw error;
+    }
+  }
+
+  const safeFulfill = async (route: import('@playwright/test').Route, response: Parameters<import('@playwright/test').Route['fulfill']>[0]) => {
+    try {
+      await route.fulfill(response);
+    } catch (error) {
+      if (isContextDestroyedError(error)) return;
+      throw error;
+    }
+  };
+
   await page.route('**/api/health', async (route) => {
     await route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' });
   });
@@ -1276,27 +1304,35 @@ async function wireOnboardingMocks(
 
   await page.route('**/api/integrations/vela/status', async (route) => {
     statusCalls += 1;
-    await page.evaluate((calls) => {
+    // Reload-safe: page.reload destroys the execution context while this handler
+    // may be awaiting delay/statusGate. Swallow context-destroyed errors.
+    await safeEvaluate((calls) => {
       window.__amrOnboardingStatusCalls = calls;
     }, statusCalls);
     if (options.statusGate) {
-      await options.statusGate;
+      try {
+        await options.statusGate;
+      } catch (error) {
+        if (!isContextDestroyedError(error)) throw error;
+      }
+      if (page.isClosed()) return;
     }
     if (options.failAllStatusPolls) {
-      await route.fulfill({
+      await safeFulfill(route, {
         status: 500,
         contentType: 'application/json',
         body: JSON.stringify({ error: 'status unavailable' }),
       });
       statusResponses += 1;
-      await page.evaluate((responses) => {
+      await safeEvaluate((responses) => {
         window.__amrOnboardingStatusResponses = responses;
       }, statusResponses);
       return;
     }
-    if (loginInFlight && await page.evaluate(() => (
+    const completeLogin = await safeEvaluate(() => (
       window.__amrOnboardingCompleteLogin === true
-    ))) {
+    ));
+    if (loginInFlight && completeLogin) {
       loggedIn = true;
       loginInFlight = false;
     }
@@ -1307,18 +1343,20 @@ async function wireOnboardingMocks(
       (!loggedIn &&
         typeof options.delaySignedOutStatusMs === 'number' &&
         options.delaySignedOutStatusMs > 0 &&
-        (await page.evaluate(() => {
+        (await safeEvaluate(() => {
           if (!window.__amrOnboardingDelayNextSignedOutStatus) return false;
           window.__amrOnboardingDelayNextSignedOutStatus = false;
           return true;
-        })));
+        }) ?? false));
     if (shouldDelaySignedOutStatus) {
       const delayMs = shouldDelayAllStatuses
         ? delayAllStatusMs
         : options.delaySignedOutStatusMs ?? 0;
       await new Promise((resolve) => setTimeout(resolve, delayMs));
+      // If the page navigated during the artificial delay, still fulfill
+      // the pending status request so the route does not hang.
     }
-    await route.fulfill({
+    await safeFulfill(route, {
       json: loggedIn
         ? {
             loggedIn: true,
@@ -1341,11 +1379,11 @@ async function wireOnboardingMocks(
           },
     });
     statusResponses += 1;
-    await page.evaluate((responses) => {
+    await safeEvaluate((responses) => {
       window.__amrOnboardingStatusResponses = responses;
     }, statusResponses);
     if (shouldDelaySignedOutStatus) {
-      await page.evaluate(() => {
+      await safeEvaluate(() => {
         window.__amrOnboardingSlowStatusResolved = true;
       });
     }
@@ -1372,10 +1410,10 @@ async function wireOnboardingMocks(
       loggedIn = true;
       loginInFlight = false;
     }
-    await page.evaluate((calls) => {
+    await safeEvaluate((calls) => {
       window.__amrOnboardingLoginCalls = calls;
     }, loginCalls);
-    await route.fulfill({
+    await safeFulfill(route, {
       status: 202,
       json: {
         pid: 4242,
@@ -1390,19 +1428,63 @@ async function wireOnboardingMocks(
     expect(route.request().postDataJSON()).toEqual({ authAttemptId });
     cancelCalls += 1;
     loginInFlight = false;
-    await page.evaluate((calls) => {
+    await safeEvaluate((calls) => {
       window.__amrOnboardingCancelCalls = calls;
     }, cancelCalls);
-    await route.fulfill({ json: { canceled: true, pids: [4242] } });
+    await safeFulfill(route, { json: { canceled: true, pids: [4242] } });
   });
 
   await page.route('**/api/integrations/vela/logout', async (route) => {
     loggedIn = false;
     loginInFlight = false;
-    await route.fulfill({ json: { ok: true } });
+    await safeFulfill(route, { json: { ok: true } });
   });
 
   return config;
+}
+
+async function reinstallStatusMockForReload(page: Page) {
+  // Mirrors the BYOK cold-reload guard (unroute before reload): replace the
+  // polling mock before navigation so an in-flight status response cannot
+  // evaluate into a destroyed execution context. Preserves loginInFlight and
+  // honors __amrOnboardingCompleteLogin for the resume test.
+  await page.unroute('**/api/integrations/vela/status');
+  await page.route('**/api/integrations/vela/status', async (route) => {
+    let completeLogin = false;
+    if (!page.isClosed()) {
+      try {
+        completeLogin = await page.evaluate(() => window.__amrOnboardingCompleteLogin === true);
+      } catch (error) {
+        if (!isContextDestroyedError(error)) throw error;
+      }
+    }
+    try {
+      await route.fulfill({
+        json: completeLogin
+          ? {
+              loggedIn: true,
+              loginInFlight: false,
+              sessionState: 'authenticated',
+              credentialRevision: 'onboarding-test-credential',
+              profile: 'local',
+              configPath: '/tmp/.amr/config.json',
+              user: { id: 'user-1', email: 'onboarding@example.com', plan: 'free' },
+            }
+          : {
+              loggedIn: false,
+              loginInFlight: true,
+              authAttemptId: '11111111-1111-4111-8111-111111111111',
+              sessionState: 'signed_out',
+              credentialRevision: 'signed-out',
+              profile: 'local',
+              configPath: '/tmp/.amr/config.json',
+              user: null,
+            },
+      });
+    } catch (error) {
+      if (!isContextDestroyedError(error)) throw error;
+    }
+  });
 }
 
 async function gotoOnboarding(page: Page) {

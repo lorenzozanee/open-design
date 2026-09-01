@@ -13922,6 +13922,7 @@ export async function startServer({
     // empty-output guard below skips them via `trackingSubstantiveOutput`.
     let agentProducedOutput = false;
     let trackingSubstantiveOutput = false;
+    let agentObservedToolUse = false;
     // Event types that count as "the agent actually produced a response or a
     // deliverable." Lifecycle markers (`status`), meter readings (`usage`),
     // reasoning deltas, and tool activity deliberately do NOT count: a run can
@@ -14138,6 +14139,7 @@ export async function startServer({
     function observeToolEventForLoop(ev: any) {
       if (!ev || typeof ev !== 'object') return;
       if (ev.type === 'tool_use' && typeof ev.id === 'string') {
+        agentObservedToolUse = true;
         toolLoopGuard.observeToolUse(ev.id, typeof ev.name === 'string' ? ev.name : 'tool', ev.input);
         return;
       }
@@ -15148,9 +15150,12 @@ export async function startServer({
         !agentProducedOutput
       ) {
         markRpcCloseReason('empty_output');
+        const emptyOutputMessage = agentObservedToolUse
+          ? 'Agent completed without producing any output after executing tools. The model returned tool calls but no design was produced. Check the run tool results for errors, then retry or try a different model.'
+          : 'Agent completed without producing any output. The model or provider may have returned an empty response. Check the agent logs for upstream errors, then try re-authenticating the agent or switching models.';
         send('error', createSseErrorPayload(
           'AGENT_EXECUTION_FAILED',
-          'Agent completed without producing any output. The model or provider may have returned an empty response. Check the agent logs for upstream errors, then try re-authenticating the agent or switching models.',
+          emptyOutputMessage,
           { retryable: true },
         ));
         return finishWithRetryDecision('failed', code, signal);
